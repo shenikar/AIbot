@@ -1,19 +1,29 @@
 package config
 
 import (
+	"log"
 	"os"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	BotToken  string
-	OpenAIkey string
-	RedisAddr string
+	BotToken    string
+	ProxyAPIKey string
+	ProxyAPIURL string
+	RedisAddr   string
 }
 
 func LoadConfig() Config {
-	return Config{
-		BotToken:  os.Getenv("BOT_TOKEN"),
-		OpenAIkey: os.Getenv("OPENAI_KEY"),
-		RedisAddr: os.Getenv("REDIS_ADDR"),
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Ошибка загрузки .env файла")
 	}
+	cfg := Config{
+		BotToken:    os.Getenv("BOT_TOKEN"),
+		ProxyAPIKey: os.Getenv("ProxyAPIKey"),
+		ProxyAPIURL: os.Getenv("ProxyAPIURL"),
+		RedisAddr:   os.Getenv("REDIS_ADDR"),
+	}
+	return cfg
 }
