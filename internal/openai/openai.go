@@ -1,41 +1,98 @@
 package openai
 
 import (
-	"context"
-
-	"github.com/sashabaranov/go-openai"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
 )
 
 type OpenAIService struct {
-	client *openai.Client
+	apiKey   string
+	proxyURL string
 }
 
-func NewOpenAIService(apiKey string) *OpenAIService {
+func NewOpenAIService(apiKey, proxyURL string) *OpenAIService {
 	return &OpenAIService{
-		client: openai.NewClient(apiKey),
+		apiKey:   apiKey,
+		proxyURL: proxyURL,
 	}
+}
+
+type ChatCompletionRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 func (s *OpenAIService) GetAIResponse(history []string) (string, error) {
-	message := []openai.ChatCompletionMessage{
-		{
-			Role:    "system",
-			Content: "Ты полезный AI-бот.",
-		},
+	messages := []Message{
+		{Role: "system", Content: "Ты полезный AI-бот."},
 	}
+
 	for _, msg := range history {
-		message = append(message, openai.ChatCompletionMessage{
-			Role:    "user",
-			Content: msg,
-		})
+		messages = append(messages, Message{Role: "user", Content: msg})
 	}
-	response, err := s.client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-		Model:    openai.GPT4o,
-		Messages: message,
-	},
-	)
+
+	reqBody := ChatCompletionRequest{
+		Model:    "gpt-3.5-turbo", // Используйте модель, подходящую для ProxyAPI
+		Messages: messages,
+	}
+
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err
 	}
-	return response.Choices[0].Message.Content, nil
+
+	// Отправка запроса через ProxyAPI
+	req, err := http.NewRequest("POST", s.proxyURL, bytes.NewBuffer(body))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ошибка запроса: статус %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return "", err
+	}
+
+	choices, ok := response["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return "", errors.New("не получен ответ от ProxyAPI")
+	}
+
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return "", errors.New("неверная структура ответа")
+	}
+
+	message, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return "", errors.New("не найдено поле 'message'")
+	}
+
+	content, ok := message["content"].(string)
+	if !ok {
+		return "", errors.New("не найдено содержимое сообщения")
+	}
+
+	return content, nil
 }
