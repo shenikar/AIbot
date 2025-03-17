@@ -30,6 +30,19 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+type ImageGenerationRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	N      int    `json:"n"`
+	Size   string `json:"size"`
+}
+
+type ImageGenerationResponse struct {
+	Data []struct {
+		URL string `json:"url"`
+	} `json:"data"`
+}
+
 func (s *OpenAIService) GetAIResponse(history []string) (string, error) {
 	messages := []Message{
 		{Role: "system", Content: "Ты полезный AI-бот."},
@@ -40,7 +53,7 @@ func (s *OpenAIService) GetAIResponse(history []string) (string, error) {
 	}
 
 	reqBody := ChatCompletionRequest{
-		Model:    "gpt-3.5-turbo", // Используйте модель, подходящую для ProxyAPI
+		Model:    "gpt-4o", // model
 		Messages: messages,
 	}
 
@@ -50,7 +63,7 @@ func (s *OpenAIService) GetAIResponse(history []string) (string, error) {
 	}
 
 	// Отправка запроса через ProxyAPI
-	req, err := http.NewRequest("POST", s.proxyURL, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", s.proxyURL+"/openai/v1/chat/completions", bytes.NewBuffer(body))
 	if err != nil {
 		return "", err
 	}
@@ -95,4 +108,48 @@ func (s *OpenAIService) GetAIResponse(history []string) (string, error) {
 	}
 
 	return content, nil
+}
+
+func (s *OpenAIService) GenerateImage(prompt string) ([]string, error) {
+	reqBody := ImageGenerationRequest{
+		Model:  "dall-e-3", // model
+		Prompt: prompt,
+		N:      1,
+		Size:   "1024x1024",
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", s.proxyURL+"/openai/v1/images/generations", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ошибка запроса: статус %d", resp.StatusCode)
+	}
+
+	var response ImageGenerationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+
+	if len(response.Data) == 0 {
+		return nil, errors.New("не получен ответ от ProxyAPI")
+	}
+
+	return []string{response.Data[0].URL}, nil
 }
