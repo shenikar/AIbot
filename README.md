@@ -1,4 +1,4 @@
-# AIbot
+# :bust_in_silhouette: AIbot
 
 AIbot — Telegram-бот для генерации изображений с использованием DALL·E и других AI-сервисов, разработанный на Go.
 
