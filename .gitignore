@@ -26,3 +26,7 @@ go.work.sum
 
 # redis
 dump.rdb
+
+# log
+*.log
+
