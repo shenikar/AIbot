@@ -5,14 +5,17 @@ import (
 	"AIbot/internal/storage"
 	"log"
 	"strings"
+	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type TGBot struct {
-	api           *tgbotapi.BotAPI
-	openAIService *openai.OpenAIService
-	storage       *storage.RedisStorage
+	api                   *tgbotapi.BotAPI
+	openAIService         *openai.OpenAIService
+	storage               *storage.RedisStorage
+	waitingForImagePrompt map[int64]bool // Флаг ожидания описания изображения
+	mu                    sync.Mutex
 }
 
 func NewTGBot(token string, ai *openai.OpenAIService, storage *storage.RedisStorage) (*TGBot, error) {
@@ -24,9 +27,10 @@ func NewTGBot(token string, ai *openai.OpenAIService, storage *storage.RedisStor
 
 	log.Println("Бот успешно создан! Запущен под именем:", bot.Self.UserName)
 	return &TGBot{
-		api:           bot,
-		openAIService: ai,
-		storage:       storage,
+		api:                   bot,
+		openAIService:         ai,
+		storage:               storage,
+		waitingForImagePrompt: make(map[int64]bool),
 	}, nil
 }
 
@@ -42,24 +46,29 @@ func (b *TGBot) StartPolling() {
 		userID := update.Message.Chat.ID
 		userMsg := update.Message.Text
 
+		// Проверяем, ожидает ли бот описание для генерации изображения
+		b.mu.Lock()
+		waiting := b.waitingForImagePrompt[userID]
+		b.mu.Unlock()
+
+		if waiting {
+			b.handleImageGeneration(userID, userMsg)
+			continue
+		}
+
+		// Если сообщение - это команда, обрабатываем команду
 		if update.Message.IsCommand() {
 			b.handleCommand(update.Message)
 			continue
 		}
 
-		// Если сообщение начинается с /image, то запросим описание для генерации изображения
-		if strings.HasPrefix(strings.ToLower(userMsg), "/image") {
-			b.handleImageRequest(update.Message)
-			continue
-		}
-
-		// Если сообщение начинается с "нарисуй", то генерируем изображение
+		// Если текст начинается с "нарисуй", обрабатываем как генерацию изображения
 		if strings.HasPrefix(strings.ToLower(userMsg), "нарисуй") {
-			b.handleImageGeneration(update.Message)
+			b.handleImageGeneration(userID, strings.TrimSpace(strings.TrimPrefix(userMsg, "нарисуй")))
 			continue
 		}
 
-		// Обработка обычных текстовых сообщений
+		// Обычные текстовые сообщения
 		history := b.storage.GetHistory(userID)
 		history = append(history, userMsg)
 		aiResponse, err := b.openAIService.GetAIResponse(history)
@@ -76,34 +85,39 @@ func (b *TGBot) StartPolling() {
 
 // Обработка команды /image
 func (b *TGBot) handleImageRequest(msg *tgbotapi.Message) {
-	// Запрашиваем описание для изображения
-	b.sendMessage(msg.Chat.ID, "Пожалуйста, отправьте описание для генерации изображения. Например: 'Нарисуй кота на крыше'.")
+	b.mu.Lock()
+	b.waitingForImagePrompt[msg.Chat.ID] = true
+	b.mu.Unlock()
+
+	b.sendMessage(msg.Chat.ID, "Пожалуйста, отправьте описание для генерации изображения. Например: 'кот на крыше'.")
 }
 
-// Генерация изображения, если текст начинается с "нарисуй"
-func (b *TGBot) handleImageGeneration(msg *tgbotapi.Message) {
-	prompt := strings.TrimPrefix(strings.ToLower(msg.Text), "нарисуй")
-	prompt = strings.TrimSpace(prompt)
+// Генерация изображения
+func (b *TGBot) handleImageGeneration(userID int64, prompt string) {
+	// Сбрасываем флаг ожидания описания
+	b.mu.Lock()
+	b.waitingForImagePrompt[userID] = false
+	b.mu.Unlock()
 
+	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		b.sendMessage(msg.Chat.ID, "Пожалуйста, укажите описание для генерации изображения. Например: 'нарисуй кота на крыше'.")
+		b.sendMessage(userID, "Пожалуйста, укажите описание для генерации изображения. Например: 'кот на крыше'.")
 		return
 	}
 
-	b.sendMessage(msg.Chat.ID, "Генерирую изображение, пожалуйста, подождите...")
+	b.sendMessage(userID, "Генерирую изображение, пожалуйста, подождите...")
 
-	// Генерация изображения
 	imageURLs, err := b.openAIService.GenerateImage(prompt)
 	if err != nil {
-		b.sendMessage(msg.Chat.ID, "Ошибка при генерации изображения: "+err.Error())
+		b.sendMessage(userID, "Ошибка при генерации изображения: "+err.Error())
 		return
 	}
 
 	if len(imageURLs) > 0 {
-		photo := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileURL(imageURLs[0]))
+		photo := tgbotapi.NewPhoto(userID, tgbotapi.FileURL(imageURLs[0]))
 		b.api.Send(photo)
 	} else {
-		b.sendMessage(msg.Chat.ID, "Не удалось сгенерировать изображение.")
+		b.sendMessage(userID, "Не удалось сгенерировать изображение.")
 	}
 }
 
@@ -123,9 +137,11 @@ func (b *TGBot) handleCommand(msg *tgbotapi.Message) {
 // Обработка команды /start
 func (b *TGBot) handleStart(msg *tgbotapi.Message) {
 	welcomeText := "Привет! Я бот, который может помочь с генерацией изображений и ответами на ваши текстовые сообщения.\n\n" +
-		"1. Для генерации изображения используйте команду /image или напишите 'нарисуй'.\n" +
-		"   Например: 'нарисуй кота на крыльце'.\n" +
-		"2. Я также могу отвечать на ваши текстовые сообщения. Просто напишите что-нибудь, и я постараюсь помочь."
+		"1. Для генерации изображения используйте команду /image и отправьте описание.\n" +
+		"   Например: 'кот на крыше'.\n" +
+		"2. Можно сразу написать 'нарисуй' + описание.\n" +
+		"   Например: 'нарисуй дракона в небе'.\n" +
+		"3. Я также могу отвечать на текстовые сообщения, просто напишите мне!"
 	b.sendMessage(msg.Chat.ID, welcomeText)
 }
 
